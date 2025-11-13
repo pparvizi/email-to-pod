@@ -37,15 +37,29 @@ def fetch_unread_emails():
             subject = subject.decode(encoding or "utf-8", errors="ignore")
         subject = subject or "No Subject"
 
+
+        
         # Extract plain text body
         body = ""
         if msg.is_multipart():
             for part in msg.walk():
-                if part.get_content_type() == "text/plain":
+                content_type = part.get_content_type()
+                if content_type == "text/plain":
                     body = part.get_payload(decode=True).decode(errors="ignore")
                     break
+                elif content_type == "text/html" and not body:
+                    # fallback to HTML if no plain text yet
+                    html_content = part.get_payload(decode=True).decode(errors="ignore")
+                    # optional: strip HTML tags simply
+                    import re
+                    body = re.sub('<[^<]+?>', '', html_content)
         else:
             body = msg.get_payload(decode=True).decode(errors="ignore")
+        
+        # Skip empty bodies
+        if not body.strip():
+            print(f"Skipping email '{subject}' because body is empty")
+            continue
 
         # Convert to MP3
         filename = f"{eid.decode()}.mp3"
