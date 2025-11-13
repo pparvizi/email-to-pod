@@ -104,8 +104,8 @@ def audio(filename):
 
 @app.route("/envtest")
 def envtest():
-    user = os.environ.get("GMAIL_USER")
-    pw_set = bool(os.environ.get("GMAIL_PASS"))
+    user = os.environ.get("GMAIL_ADDRESS")
+    pw_set = bool(os.environ.get("GMAIL_APP_PASSWORD"))
     return {
         "GMAIL_USER": user,
         "GMAIL_PASS_SET": pw_set
