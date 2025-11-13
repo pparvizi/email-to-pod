@@ -9,8 +9,8 @@ import xml.etree.ElementTree as ET
 AUDIO_DIR = "/tmp/audio"
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
-GMAIL_USER = os.environ.get("GMAIL_USER")
-GMAIL_PASS = os.environ.get("GMAIL_PASS")
+GMAIL_USER = os.environ.get("GMAIL_ADDRESS")
+GMAIL_PASS = os.environ.get("GMAIL_APP_PASSWORD")
 APP_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:10000")
 
 app = Flask(__name__)
