@@ -88,6 +88,15 @@ def audio(filename):
         return Response(data, mimetype="audio/mpeg")
     return "Not found", 404
 
+@app.route("/envtest")
+def envtest():
+    user = os.environ.get("GMAIL_USER")
+    pw_set = bool(os.environ.get("GMAIL_PASS"))
+    return {
+        "GMAIL_USER": user,
+        "GMAIL_PASS_SET": pw_set
+    }
+
 if __name__ == "__main__":
     new_emails = fetch_unread_emails()
     print(f"Generated {len(new_emails)} new MP3 files.")
