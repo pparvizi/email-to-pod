@@ -5,15 +5,65 @@ from email.header import decode_header
 from gtts import gTTS
 from flask import Flask, Response
 import xml.etree.ElementTree as ET
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+import re
 
+# Temporary local storage
 AUDIO_DIR = "/tmp/audio"
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
+# Gmail
 GMAIL_USER = os.environ.get("GMAIL_ADDRESS")
 GMAIL_PASS = os.environ.get("GMAIL_APP_PASSWORD")
 APP_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:10000")
 
+# Google Drive
+SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")  # path to JSON key
+MP3_FOLDER_ID = os.environ.get("GDRIVE_MP3_FOLDER_ID")               # Drive folder for MP3s
+DOC_FOLDER_ID = os.environ.get("GDRIVE_DOC_FOLDER_ID")               # Drive folder for Docs
+
+credentials = service_account.Credentials.from_service_account_file(
+    SERVICE_ACCOUNT_FILE,
+    scopes=["https://www.googleapis.com/auth/drive"]
+)
+drive_service = build("drive", "v3", credentials=credentials)
+
 app = Flask(__name__)
+
+def upload_to_drive(filepath, filename, folder_id, mimetype):
+    """Upload a file to Google Drive."""
+    file_metadata = {
+        "name": filename,
+        "parents": [folder_id]
+    }
+    media = MediaFileUpload(filepath, mimetype=mimetype, resumable=True)
+    file = drive_service.files().create(
+        body=file_metadata,
+        media_body=media,
+        fields="id, webContentLink"
+    ).execute()
+    # Make the file public
+    drive_service.permissions().create(
+        fileId=file["id"],
+        body={"role": "reader", "type": "anyone"}
+    ).execute()
+    # Return public link
+    return f"https://drive.google.com/uc?id={file['id']}&export=download"
+
+def create_google_doc(text, name):
+    """Create a Google Doc with the email text."""
+    doc_service = build("docs", "v1", credentials=credentials)
+    doc = doc_service.documents().create(body={"title": name}).execute()
+    doc_id = doc["documentId"]
+    doc_service.documents().batchUpdate(
+        documentId=doc_id,
+        body={"requests": [{"insertText": {"location": {"index": 1}, "text": text}}]}
+    ).execute()
+    # Move to folder
+    drive_service.files().update(fileId=doc_id, addParents=DOC_FOLDER_ID).execute()
+    return doc_id
 
 def fetch_unread_emails():
     print("Connecting to Gmail IMAP...")
@@ -37,38 +87,35 @@ def fetch_unread_emails():
             subject = subject.decode(encoding or "utf-8", errors="ignore")
         subject = subject or "No Subject"
 
-
-        
         # Extract plain text body
         body = ""
         if msg.is_multipart():
             for part in msg.walk():
-                content_type = part.get_content_type()
-                if content_type == "text/plain":
+                ctype = part.get_content_type()
+                if ctype == "text/plain":
                     body = part.get_payload(decode=True).decode(errors="ignore")
                     break
-                elif content_type == "text/html" and not body:
-                    # fallback to HTML if no plain text yet
+                elif ctype == "text/html" and not body:
                     html_content = part.get_payload(decode=True).decode(errors="ignore")
-                    # optional: strip HTML tags simply
-                    import re
                     body = re.sub('<[^<]+?>', '', html_content)
         else:
             body = msg.get_payload(decode=True).decode(errors="ignore")
-        
-        # Skip empty bodies
+
         if not body.strip():
-            print(f"Skipping email '{subject}' because body is empty")
+            print(f"Skipping empty email: {subject}")
             continue
 
         # Convert to MP3
         filename = f"{eid.decode()}.mp3"
         filepath = os.path.join(AUDIO_DIR, filename)
-        if not os.path.exists(filepath):
-            print(f"Creating audio for: {subject}")
-            tts = gTTS(body[:2000])  # limit length for speed
-            tts.save(filepath)
-        results.append({"subject": subject, "file": filename})
+        tts = gTTS(body[:2000])
+        tts.save(filepath)
+
+        # Upload to Google Drive
+        mp3_url = upload_to_drive(filepath, filename, MP3_FOLDER_ID, "audio/mpeg")
+        create_google_doc(body, f"{subject}")  # store text in Docs
+
+        results.append({"subject": subject, "file_url": mp3_url})
     mail.logout()
     return results
 
@@ -82,37 +129,23 @@ def generate_rss(emails):
     for email_info in emails:
         item = ET.SubElement(channel, "item")
         ET.SubElement(item, "title").text = email_info["subject"]
-        ET.SubElement(item, "enclosure", url=f"{APP_URL}/audio/{email_info['file']}", type="audio/mpeg")
-        ET.SubElement(item, "guid").text = f"{APP_URL}/audio/{email_info['file']}"
+        ET.SubElement(item, "enclosure", url=email_info["file_url"], type="audio/mpeg")
+        ET.SubElement(item, "guid").text = email_info["file_url"]
     return ET.tostring(rss, encoding="utf-8")
 
 @app.route("/feed")
 def feed():
-    files = [f for f in os.listdir(AUDIO_DIR) if f.endswith(".mp3")]
-    emails = [{"subject": f.split('.')[0], "file": f} for f in files]
+    emails = fetch_unread_emails()
     xml_data = generate_rss(emails)
     return Response(xml_data, mimetype="application/rss+xml")
 
-@app.route("/audio/<path:filename>")
-def audio(filename):
-    path = os.path.join(AUDIO_DIR, filename)
-    if os.path.exists(path):
-        with open(path, "rb") as f:
-            data = f.read()
-        return Response(data, mimetype="audio/mpeg")
-    return "Not found", 404
-
 @app.route("/envtest")
 def envtest():
-    user = os.environ.get("GMAIL_ADDRESS")
-    pw_set = bool(os.environ.get("GMAIL_APP_PASSWORD"))
     return {
-        "GMAIL_USER": user,
-        "GMAIL_PASS_SET": pw_set
+        "GMAIL_USER": GMAIL_USER,
+        "GMAIL_PASS_SET": bool(GMAIL_PASS)
     }
 
 if __name__ == "__main__":
-    new_emails = fetch_unread_emails()
-    print(f"Generated {len(new_emails)} new MP3 files.")
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
