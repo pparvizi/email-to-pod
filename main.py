@@ -1,102 +1,84 @@
 import os
+import base64
 import time
-import imaplib
-import email
-from email.header import decode_header
-from gtts import gTTS
+import requests
 from flask import Flask, Response
-from feedgen.feed import FeedGenerator
+from gtts import gTTS
+import xml.etree.ElementTree as ET
 
-# ===== Configuration =====
-EMAIL = os.environ.get("GMAIL_ADDRESS")
-PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
-MAIL_SERVER = "imap.gmail.com"
-CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 300))  # seconds
-
-# Storage paths
-AUDIO_DIR = "audio"
-FEED_FILE = "feed.xml"
-os.makedirs(AUDIO_DIR, exist_ok=True)
-
-# ===== RSS Feed Setup =====
-fg = FeedGenerator()
-fg.load_extension('podcast')
-fg.title("Email to Pod")
-fg.link(href="https://your-render-app-name.onrender.com/feed")
-fg.description("A private podcast of your emails as audio.")
+# Configuration
+GMAIL_API_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+ACCESS_TOKEN = os.environ.get("GMAIL_ACCESS_TOKEN")
+APP_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:10000")
 
 app = Flask(__name__)
+AUDIO_DIR = "/tmp/audio"
+os.makedirs(AUDIO_DIR, exist_ok=True)
 
-# ===== Helper functions =====
-def fetch_emails():
-    mail = imaplib.IMAP4_SSL(MAIL_SERVER)
-    mail.login(EMAIL, PASSWORD)
-    mail.select("inbox")
+def get_emails():
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
+    params = {"labelIds": ["INBOX"], "q": "is:unread"}
+    r = requests.get(GMAIL_API_URL, headers=headers, params=params)
+    if r.status_code != 200:
+        print("Error fetching emails:", r.text)
+        return []
 
-    status, messages = mail.search(None, 'UNSEEN')
-    mail_ids = messages[0].split()
-    new_items = []
+    data = r.json().get("messages", [])
+    emails = []
+    for msg in data:
+        msg_id = msg["id"]
+        detail = requests.get(f"{GMAIL_API_URL}/{msg_id}", headers=headers).json()
+        snippet = detail.get("snippet", "")
+        headers_list = detail.get("payload", {}).get("headers", [])
+        subject = next((h["value"] for h in headers_list if h["name"] == "Subject"), "No Subject")
 
-    for num in mail_ids:
-        status, data = mail.fetch(num, "(RFC822)")
-        msg = email.message_from_bytes(data[0][1])
+        # Convert to audio
+        filename = f"{msg_id}.mp3"
+        filepath = os.path.join(AUDIO_DIR, filename)
+        if not os.path.exists(filepath):
+            tts = gTTS(snippet)
+            tts.save(filepath)
+            emails.append({"subject": subject, "file": filename})
 
-        subject, encoding = decode_header(msg["Subject"])[0]
-        if isinstance(subject, bytes):
-            subject = subject.decode(encoding or "utf-8", errors="ignore")
-        body = ""
+    return emails
 
-        if msg.is_multipart():
-            for part in msg.walk():
-                if part.get_content_type() == "text/plain":
-                    body += part.get_payload(decode=True).decode("utf-8", errors="ignore")
-                    break
-        else:
-            body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
+def generate_rss(emails):
+    rss = ET.Element("rss", version="2.0")
+    channel = ET.SubElement(rss, "channel")
+    ET.SubElement(channel, "title").text = "Email to Pod"
+    ET.SubElement(channel, "link").text = APP_URL
+    ET.SubElement(channel, "description").text = "Emails converted to podcast audio"
 
-        if body.strip():
-            filename = f"{AUDIO_DIR}/{int(time.time())}.mp3"
-            tts = gTTS(text=f"Subject: {subject}. {body}", lang="en")
-            tts.save(filename)
+    for email in emails:
+        item = ET.SubElement(channel, "item")
+        ET.SubElement(item, "title").text = email["subject"]
+        ET.SubElement(item, "enclosure", url=f"{APP_URL}/audio/{email['file']}", type="audio/mpeg")
+        ET.SubElement(item, "guid").text = f"{APP_URL}/audio/{email['file']}"
 
-            fe = fg.add_entry()
-            fe.id(filename)
-            fe.title(subject)
-            fe.enclosure(f"https://your-render-app-name.onrender.com/{filename}", 0, "audio/mpeg")
-            fe.pubDate(time.strftime("%a, %d %b %Y %H:%M:%S %z"))
-            new_items.append(subject)
-
-    mail.logout()
-    if new_items:
-        fg.rss_file(FEED_FILE)
-    return new_items
+    return ET.tostring(rss, encoding="utf-8")
 
 @app.route("/feed")
 def feed():
-    with open(FEED_FILE, "rb") as f:
-        return Response(f.read(), mimetype="application/rss+xml")
+    files = [f for f in os.listdir(AUDIO_DIR) if f.endswith(".mp3")]
+    emails = [{"subject": f.split('.')[0], "file": f} for f in files]
+    xml_data = generate_rss(emails)
+    return Response(xml_data, mimetype="application/rss+xml")
 
-@app.route(f"/{AUDIO_DIR}/<path:filename>")
-def serve_audio(filename):
-    with open(f"{AUDIO_DIR}/{filename}", "rb") as f:
-        return Response(f.read(), mimetype="audio/mpeg")
-
-def background_loop():
-    while True:
-        print("Checking for new emails...")
-        new = fetch_emails()
-        if new:
-            print(f"Processed: {new}")
-        time.sleep(CHECK_INTERVAL)
-
-# ===== Start background loop =====
-import threading
-threading.Thread(target=background_loop, daemon=True).start()
-
-# ===== Flask main =====
-@app.route("/")
-def index():
-    return "Email-to-Pod is running. Subscribe to /feed"
+@app.route("/audio/<path:filename>")
+def audio(filename):
+    path = os.path.join(AUDIO_DIR, filename)
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            data = f.read()
+        return Response(data, mimetype="audio/mpeg")
+    return "Not found", 404
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    print("Checking for new emails...")
+    emails = get_emails()
+    if emails:
+        print(f"Created {len(emails)} new MP3s.")
+    else:
+        print("No new unread emails found.")
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
