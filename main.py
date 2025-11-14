@@ -24,10 +24,11 @@ MP3_FOLDER_ID = os.environ.get("GDRIVE_MP3_FOLDER_ID")
 DOC_FOLDER_ID = os.environ.get("GDRIVE_DOC_FOLDER_ID")
 RSS_FILE_NAME = "email_to_pod_feed.xml"
 
-# --- Load OAuth token.json secret file ---
-TOKEN_JSON_PATH = os.environ.get("TOKEN_JSON_FILE")
-with open(TOKEN_JSON_PATH, "r") as f:
-    token_data = json.load(f)
+# --- Load OAuth token from JSON string environment variable ---
+token_json_str = os.environ.get("TOKEN_JSON")
+if not token_json_str:
+    raise ValueError("Missing TOKEN_JSON environment variable")
+token_data = json.loads(token_json_str)
 
 credentials = Credentials.from_authorized_user_info(
     token_data,
@@ -111,8 +112,7 @@ def save_rss_to_drive(xml_bytes):
             file_metadata = {"name": RSS_FILE_NAME, "parents": [MP3_FOLDER_ID]}
             file = drive_service.files().create(body=file_metadata, media_body=media).execute()
             drive_service.permissions().create(
-                fileId=file["id"],
-                body={"role": "reader", "type": "anyone"}
+                fileId=file["id"], body={"role": "reader", "type": "anyone"}
             ).execute()
     except Exception as e:
         print("Error saving RSS to Drive:", e)
@@ -200,7 +200,8 @@ def feed():
 def envtest():
     return {
         "GMAIL_USER": GMAIL_USER,
-        "GMAIL_APP_PASSWORD_SET": bool(GMAIL_APP_PASSWORD)
+        "GMAIL_PASS_SET": bool(GMAIL_APP_PASSWORD),
+        "TOKEN_JSON_SET": bool(os.environ.get("TOKEN_JSON"))
     }
 
 if __name__ == "__main__":
