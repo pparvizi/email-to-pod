@@ -31,23 +31,25 @@ RSS_FILE_NAME = "email_to_pod_feed.xml"
 APP_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
 # -----------------------------
-# LOAD OAUTH TOKEN
+# LOAD SERVICE ACCOUNT CREDENTIALS
 # -----------------------------
-token_json_str = os.environ.get("TOKEN_JSON")
-if not token_json_str:
-    raise ValueError("Missing TOKEN_JSON environment variable")
+from google.oauth2.service_account import Credentials
 
-token_data = json.loads(token_json_str)
+sa_key_json_str = os.environ.get("SA_KEY_JSON")
+if not sa_key_json_str:
+    raise ValueError("Missing SA_KEY_JSON environment variable")
 
-credentials = Credentials.from_authorized_user_info(
-    token_data,
-    scopes=[
-        "https://www.googleapis.com/auth/drive",
-        "https://www.googleapis.com/auth/documents",
-        "https://www.googleapis.com/auth/gmail.readonly"
-    ]
-)
+sa_info = json.loads(sa_key_json_str)
 
+# Scopes needed for Drive + Docs only
+SCOPES = [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/documents"
+]
+
+credentials = Credentials.from_service_account_info(sa_info, scopes=SCOPES)
+
+# Build Drive and Docs services
 drive_service = build("drive", "v3", credentials=credentials)
 doc_service = build("docs", "v1", credentials=credentials)
 
