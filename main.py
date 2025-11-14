@@ -7,9 +7,10 @@ from flask import Flask, Response
 import xml.etree.ElementTree as ET
 import re
 import json
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from io import BytesIO
 
 # Temporary local storage
 AUDIO_DIR = "/tmp/audio"
@@ -17,22 +18,23 @@ os.makedirs(AUDIO_DIR, exist_ok=True)
 
 # Gmail
 GMAIL_USER = os.environ.get("GMAIL_ADDRESS")
-GMAIL_PASS = os.environ.get("GMAIL_APP_PASSWORD")
-APP_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:10000")
+APP_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://email-to-pod.onrender.com")
 
 # Google Drive / Docs
-SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")  # full JSON text
 MP3_FOLDER_ID = os.environ.get("GDRIVE_MP3_FOLDER_ID")
 DOC_FOLDER_ID = os.environ.get("GDRIVE_DOC_FOLDER_ID")
-RSS_FILE_NAME = "email_to_pod_feed.xml"  # optional: store RSS as a Drive file
+RSS_FILE_NAME = "email_to_pod_feed.xml"
 
-# Load credentials from JSON text
-service_account_info = json.loads(SERVICE_ACCOUNT_JSON)
-credentials = service_account.Credentials.from_service_account_info(
-    service_account_info,
+# Load OAuth credentials from token.json secret file in Render
+with open("/opt/render/project/secrets/token.json", "r") as f:
+    creds_data = json.load(f)
+
+credentials = Credentials.from_authorized_user_info(
+    creds_data,
     scopes=[
         "https://www.googleapis.com/auth/drive",
-        "https://www.googleapis.com/auth/documents"
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/gmail.readonly"
     ]
 )
 
@@ -43,18 +45,13 @@ app = Flask(__name__)
 
 # --- Google Drive helpers ---
 def upload_to_drive(filepath, filename, folder_id, mimetype):
-    """Upload a file to Google Drive and make it public."""
-    file_metadata = {
-        "name": filename,
-        "parents": [folder_id]
-    }
+    file_metadata = {"name": filename, "parents": [folder_id]}
     media = MediaFileUpload(filepath, mimetype=mimetype, resumable=True)
     file = drive_service.files().create(
         body=file_metadata,
         media_body=media,
         fields="id, webContentLink"
     ).execute()
-    # Make file publicly readable
     drive_service.permissions().create(
         fileId=file["id"],
         body={"role": "reader", "type": "anyone"}
@@ -62,22 +59,18 @@ def upload_to_drive(filepath, filename, folder_id, mimetype):
     return f"https://drive.google.com/uc?id={file['id']}&export=download"
 
 def create_google_doc(text, name):
-    """Create a Google Doc with the email text in the DOC_FOLDER_ID."""
     doc = doc_service.documents().create(body={"title": name}).execute()
     doc_id = doc["documentId"]
     doc_service.documents().batchUpdate(
         documentId=doc_id,
         body={"requests": [{"insertText": {"location": {"index": 1}, "text": text}}]}
     ).execute()
-    # Move to folder
     drive_service.files().update(fileId=doc_id, addParents=DOC_FOLDER_ID).execute()
     return doc_id
 
 # --- Persistent RSS helpers ---
 def load_existing_rss():
-    """Load existing RSS entries from Drive if available."""
     try:
-        # Search for the RSS file in Drive
         results = drive_service.files().list(
             q=f"name='{RSS_FILE_NAME}' and '{MP3_FOLDER_ID}' in parents",
             spaces="drive",
@@ -88,12 +81,10 @@ def load_existing_rss():
             return []
 
         rss_file_id = files[0]["id"]
-        # Download content
-        from io import BytesIO
         request = drive_service.files().get_media(fileId=rss_file_id)
         fh = BytesIO()
-        downloader = MediaFileUpload(fh)
-        request.execute()
+        downloader = request.execute()
+        fh.write(downloader)
         fh.seek(0)
         xml_data = fh.read()
         root = ET.fromstring(xml_data)
@@ -108,23 +99,19 @@ def load_existing_rss():
         return []
 
 def save_rss_to_drive(xml_bytes):
-    """Save or update the RSS feed XML on Drive."""
     try:
-        # Check if RSS already exists
         results = drive_service.files().list(
             q=f"name='{RSS_FILE_NAME}' and '{MP3_FOLDER_ID}' in parents",
             spaces="drive",
             fields="files(id, name)"
         ).execute()
         files = results.get("files", [])
+        media = MediaFileUpload(BytesIO(xml_bytes), mimetype="application/rss+xml")
         if files:
             file_id = files[0]["id"]
-            media = MediaFileUpload(BytesIO(xml_bytes), mimetype="application/rss+xml")
             drive_service.files().update(fileId=file_id, media_body=media).execute()
         else:
-            # create new file
             file_metadata = {"name": RSS_FILE_NAME, "parents": [MP3_FOLDER_ID]}
-            media = MediaFileUpload(BytesIO(xml_bytes), mimetype="application/rss+xml")
             file = drive_service.files().create(body=file_metadata, media_body=media).execute()
             drive_service.permissions().create(
                 fileId=file["id"],
@@ -137,7 +124,7 @@ def save_rss_to_drive(xml_bytes):
 def fetch_unread_emails():
     print("Connecting to Gmail IMAP...")
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
-    mail.login(GMAIL_USER, GMAIL_PASS)
+    mail.login(GMAIL_USER, os.environ.get("GMAIL_APP_PASSWORD", ""))
     mail.select("inbox")
 
     status, messages = mail.search(None, '(UNSEEN)')
@@ -145,7 +132,7 @@ def fetch_unread_emails():
     print(f"Found {len(email_ids)} unread emails.")
 
     existing_entries = load_existing_rss()
-    results = existing_entries.copy()  # start with existing feed
+    results = existing_entries.copy()
 
     for eid in email_ids:
         status, msg_data = mail.fetch(eid, "(RFC822)")
@@ -158,7 +145,6 @@ def fetch_unread_emails():
             subject = subject.decode(encoding or "utf-8", errors="ignore")
         subject = subject or "No Subject"
 
-        # Extract plain text body
         body = ""
         if msg.is_multipart():
             for part in msg.walk():
@@ -176,13 +162,11 @@ def fetch_unread_emails():
             print(f"Skipping empty email: {subject}")
             continue
 
-        # Convert to MP3
         filename = f"{eid.decode()}.mp3"
         filepath = os.path.join(AUDIO_DIR, filename)
         tts = gTTS(body[:2000])
         tts.save(filepath)
 
-        # Upload MP3 & store text in Doc
         mp3_url = upload_to_drive(filepath, filename, MP3_FOLDER_ID, "audio/mpeg")
         create_google_doc(body, subject)
 
@@ -217,10 +201,7 @@ def feed():
 
 @app.route("/envtest")
 def envtest():
-    return {
-        "GMAIL_USER": GMAIL_USER,
-        "GMAIL_PASS_SET": bool(GMAIL_PASS)
-    }
+    return {"GMAIL_USER": GMAIL_USER, "GMAIL_PASS_SET": bool(os.environ.get("GMAIL_APP_PASSWORD"))}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
