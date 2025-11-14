@@ -1,4 +1,4 @@
-Flask==2.3.6
+Flask==2.3.3
 gTTS==2.5.1
 google-api-python-client==2.100.0
 google-auth==2.23.0
