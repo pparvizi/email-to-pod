@@ -176,62 +176,97 @@ def save_rss_to_drive(xml_bytes):
 # EMAIL PROCESSING
 # -----------------------------
 def fetch_and_process_emails():
-    print("DEBUG: GMAIL_USER =", GMAIL_USER)
-    print("DEBUG: GMAIL_APP_PASSWORD set?", bool(GMAIL_APP_PASSWORD))
-    print("IMAP: Connecting...")
+    print("DEBUG: GMAIL_USER =", GMAIL_USER, flush=True)
+    print("DEBUG: GMAIL_APP_PASSWORD set?", bool(GMAIL_APP_PASSWORD), flush=True)
 
-    mail = imaplib.IMAP4_SSL("imap.gmail.com")
-    mail.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-    mail.select("inbox")
+    try:
+        print("IMAP: Connecting...", flush=True)
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+        print("IMAP: Logged in!", flush=True)
 
-    status, messages = mail.search(None, '(UNSEEN)')
-    email_ids = messages[0].split()
-    print(f"IMAP: Found {len(email_ids)} unread")
+    except Exception as e:
+        print("FATAL: IMAP LOGIN FAILED:", e, flush=True)
+        import traceback
+        traceback.print_exc()
+        return []  # Return empty so RSS doesn’t get wiped
+
+    try:
+        mail.select("inbox")
+        status, messages = mail.search(None, '(UNSEEN)')
+        print(f"IMAP: search status={status}, raw={messages}", flush=True)
+
+        if status != "OK":
+            print("IMAP: search failed", flush=True)
+            return []
+
+        email_ids = messages[0].split()
+        print(f"IMAP: Found {len(email_ids)} unread", flush=True)
+
+    except Exception as e:
+        print("ERROR: Could not search inbox:", e, flush=True)
+        import traceback
+        traceback.print_exc()
+        return []
 
     existing = load_existing_rss()
     results = existing.copy()
 
     for eid in email_ids:
-        _, msg_data = mail.fetch(eid, "(RFC822)")
-        msg = email.message_from_bytes(msg_data[0][1])
+        try:
+            print(f"IMAP: Fetching message {eid}", flush=True)
+            _, msg_data = mail.fetch(eid, "(RFC822)")
+            msg = email.message_from_bytes(msg_data[0][1])
 
-        subject, enc = decode_header(msg["Subject"])[0]
-        if isinstance(subject, bytes):
-            subject = subject.decode(enc or "utf-8", "ignore")
-        subject = subject or "No Subject"
+            # Subject
+            subject, enc = decode_header(msg["Subject"])[0]
+            if isinstance(subject, bytes):
+                subject = subject.decode(enc or "utf-8", "ignore")
+            subject = subject or "No Subject"
 
-        # Extract body
-        body = ""
-        if msg.is_multipart():
-            for part in msg.walk():
-                ctype = part.get_content_type()
-                if ctype == "text/plain":
-                    body = part.get_payload(decode=True).decode("utf-8", "ignore")
-                    break
-                elif ctype == "text/html" and not body:
-                    html = part.get_payload(decode=True).decode("utf-8", "ignore")
-                    body = re.sub('<[^<]+?>', '', html)
-        else:
-            body = msg.get_payload(decode=True).decode("utf-8", "ignore")
+            # Body
+            body = ""
+            if msg.is_multipart():
+                for part in msg.walk():
+                    ctype = part.get_content_type()
+                    if ctype == "text/plain":
+                        body = part.get_payload(decode=True).decode("utf-8", "ignore")
+                        break
+                    elif ctype == "text/html" and not body:
+                        html = part.get_payload(decode=True).decode("utf-8", "ignore")
+                        body = re.sub('<[^<]+?>', '', html)
+            else:
+                payload = msg.get_payload(decode=True)
+                if payload:
+                    body = payload.decode("utf-8", "ignore")
 
-        if not body.strip():
-            continue
+            if not body.strip():
+                print("IMAP: Email had no usable body", flush=True)
+                continue
 
-        # Generate MP3
-        filename = f"{eid.decode()}.mp3"
-        filepath = os.path.join(AUDIO_DIR, filename)
+            # TTS
+            filename = f"{eid.decode()}.mp3"
+            filepath = os.path.join(AUDIO_DIR, filename)
+            print(f"Generating MP3: {filename}", flush=True)
 
-        tts = gTTS(body[:2000])
-        tts.save(filepath)
+            tts = gTTS(body[:2000])
+            tts.save(filepath)
 
-        mp3_url = upload_to_drive(filepath, filename, MP3_FOLDER_ID, "audio/mpeg")
-        create_google_doc(body, subject)
+            mp3_url = upload_to_drive(filepath, filename, MP3_FOLDER_ID, "audio/mpeg")
 
-        results.append({"subject": subject, "file_url": mp3_url})
+            print(f"Uploaded MP3 to {mp3_url}", flush=True)
+
+            create_google_doc(body, subject)
+
+            results.append({"subject": subject, "file_url": mp3_url})
+
+        except Exception as e:
+            print("ERROR processing a message:", e, flush=True)
+            import traceback
+            traceback.print_exc()
 
     mail.logout()
     return results
-
 
 # -----------------------------
 # RSS GENERATION
