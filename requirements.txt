@@ -1,7 +1,6 @@
-Flask==3.0.3
-feedgen==0.9.0
+Flask==2.3.6
 gTTS==2.5.1
 google-api-python-client==2.100.0
 google-auth==2.23.0
 google-auth-httplib2==0.1.0
-google-auth-oauthlib==1.1.0
+google-auth-oauthlib==1.2.0
