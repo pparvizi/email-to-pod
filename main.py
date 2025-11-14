@@ -169,6 +169,8 @@ def save_rss_to_drive(xml_bytes):
 # EMAIL PROCESSING
 # -----------------------------
 def fetch_and_process_emails():
+    print("DEBUG: GMAIL_USER=", GMAIL_USER)
+    print("DEBUG: GMAIL_APP_PASSWORD set?", bool(GMAIL_APP_PASSWORD))
     print("IMAP: Connecting...")
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(GMAIL_USER, GMAIL_APP_PASSWORD)
