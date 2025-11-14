@@ -163,7 +163,8 @@ def save_rss_to_drive(xml_bytes):
 
     except Exception as e:
         print("RSS save error:", e)
-
+        import traceback
+        traceback.print_exc()
 
 # -----------------------------
 # EMAIL PROCESSING
